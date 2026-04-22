@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Scribble Generator</title>
+</head>
+<body>
+
+<h2>Upload Image</h2>
+
+<input type="file" id="fileInput">
+<button onclick="upload()">Generate</button>
+
+<h3>Preview</h3>
+<div id="preview"></div>
+
+<script>
+function upload() {
+    const file = document.getElementById("fileInput").files[0];
+    const formData = new FormData();
+    formData.append("image", file);
+
+    fetch("/upload", {
+        method: "POST",
+        body: formData
+    })
+    .then(res => res.json())
+    .then(data => {
+        document.getElementById("preview").innerHTML =
+            `<img src="${data.svg_url}?t=${Date.now()}" width="400"/>`;
+    });
+}
+</script>
+
+</body>
+</html>

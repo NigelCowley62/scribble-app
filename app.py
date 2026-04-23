@@ -16,10 +16,21 @@ def index():
 @app.route("/upload", methods=["POST"])
 def upload():
     file = request.files["image"]
+
+    density = int(request.form.get("density", 1200))
+    smooth = float(request.form.get("smooth", 5))
+    chaos = float(request.form.get("chaos", 0.2))
+
     input_path = os.path.join(UPLOAD_FOLDER, file.filename)
     file.save(input_path)
 
-    process_image_to_svg(input_path, OUTPUT_FILE)
+    process_image_to_svg(
+        input_path,
+        OUTPUT_FILE,
+        density=density,
+        smoothness=smooth,
+        chaos=chaos
+    )
 
     return {"svg_url": "/download"}
 

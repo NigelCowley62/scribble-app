@@ -1,52 +1,207 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Scribble Generator</title>
+    <title>Plotter Art Generator</title>
+
+    <!-- Cropper -->
+    <link href="https://unpkg.com/cropperjs@1.5.13/dist/cropper.min.css" rel="stylesheet"/>
+    <script src="https://unpkg.com/cropperjs@1.5.13/dist/cropper.min.js"></script>
+
+    <style>
+        body {
+            font-family: Arial;
+            margin: 40px;
+            background: #f5f5f5;
+        }
+
+        .container {
+            display: flex;
+            gap: 40px;
+        }
+
+        .panel {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        input, select {
+            width: 100%;
+            margin-bottom: 15px;
+        }
+
+        button {
+            padding: 10px;
+            width: 100%;
+            background: black;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+
+        #image {
+            width: 100%;
+            display: none;
+        }
+
+        .image-container {
+            width: 100%;
+            max-height: 400px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+
+        img {
+            max-width: 100%;
+        }
+    </style>
 </head>
+
 <body>
 
-<h2>Upload Image</h2>
+<h1>Plotter Art Generator</h1>
 
-<input type="file" id="fileInput"><br><br>
+<div class="container">
 
-<label>Line Density</label><br>
-<input type="range" id="density" min="500" max="3000" value="1200"><br><br>
+    <!-- LEFT PANEL -->
+    <div class="panel" style="width:300px">
 
-<label>Smoothness</label><br>
-<input type="range" id="smooth" min="1" max="20" value="5"><br><br>
+        <label>Upload Image</label>
+        <input type="file" id="fileInput">
 
-<label>Chaos</label><br>
-<input type="range" id="chaos" min="0" max="1" step="0.1" value="0.2"><br><br>
+        <!-- CROPPER AREA -->
+        <div class="image-container">
+            <img id="image">
+        </div>
 
-<button onclick="upload()">Generate</button>
+        <label>Line Density</label>
+        <input type="range" id="density" min="500" max="3000" value="1200">
 
-<h3>Preview</h3>
-<div id="preview">Waiting...</div>
+        <label>Smoothness</label>
+        <input type="range" id="smooth" min="1" max="20" value="5">
+
+        <label>Chaos</label>
+        <input type="range" id="chaos" min="0" max="1" step="0.1" value="0.2">
+
+        <label>Paper Size</label>
+        <select id="size">
+            <option value="A4">A4</option>
+            <option value="A3">A3</option>
+            <option value="A2">A2</option>
+            <option value="A1">A1</option>
+        </select>
+
+        <label>Orientation</label>
+        <select id="orientation">
+            <option value="portrait">Portrait</option>
+            <option value="landscape">Landscape</option>
+        </select>
+
+        <button onclick="upload()">Generate</button>
+
+    </div>
+
+    <!-- RIGHT PANEL -->
+    <div class="panel" style="flex:1">
+
+        <h3>Preview</h3>
+        <div id="preview">Upload an image to begin</div>
+
+    </div>
+
+</div>
 
 <script>
+let cropper;
+
+const imageInput = document.getElementById("fileInput");
+const image = document.getElementById("image");
+
+// -----------------------------
+// LOAD IMAGE + INIT CROPPER
+// -----------------------------
+imageInput.addEventListener("change", function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const url = URL.createObjectURL(file);
+
+    image.onload = function () {
+        image.style.display = "block";
+
+        if (cropper) cropper.destroy();
+
+        cropper = new Cropper(image, {
+            aspectRatio: getAspectRatio(),
+            viewMode: 1,
+            background: false
+        });
+    };
+
+    image.src = url;
+});
+
+// -----------------------------
+// ASPECT RATIO (A SERIES)
+// -----------------------------
+function getAspectRatio() {
+    const orientation = document.getElementById("orientation").value;
+    return orientation === "portrait" ? (1 / 1.414) : 1.414;
+}
+
+// -----------------------------
+// UPDATE ON ORIENTATION CHANGE
+// -----------------------------
+document.getElementById("orientation").addEventListener("change", () => {
+    if (cropper) {
+        cropper.setAspectRatio(getAspectRatio());
+    }
+});
+
+// -----------------------------
+// UPLOAD CROPPED IMAGE
+// -----------------------------
 function upload() {
-    const file = document.getElementById("fileInput").files[0];
+
+    if (!cropper) {
+        alert("Please upload and crop an image first");
+        return;
+    }
+
+    const canvas = cropper.getCroppedCanvas({
+        width: 400,
+        height: 400
+    });
 
     const density = document.getElementById("density").value;
     const smooth = document.getElementById("smooth").value;
     const chaos = document.getElementById("chaos").value;
+    const size = document.getElementById("size").value;
+    const orientation = document.getElementById("orientation").value;
 
-    const formData = new FormData();
-    formData.append("image", file);
-    formData.append("density", density);
-    formData.append("smooth", smooth);
-    formData.append("chaos", chaos);
+    canvas.toBlob(blob => {
 
-    document.getElementById("preview").innerHTML = "Processing...";
+        const formData = new FormData();
+        formData.append("image", blob, "cropped.png");
+        formData.append("density", density);
+        formData.append("smooth", smooth);
+        formData.append("chaos", chaos);
+        formData.append("size", size);
+        formData.append("orientation", orientation);
 
-    fetch("/upload", {
-        method: "POST",
-        body: formData
-    })
-    .then(res => res.json())
-    .then(data => {
-        document.getElementById("preview").innerHTML =
-            `<img src="${data.svg_url}?t=${Date.now()}" width="400"/>`;
+        document.getElementById("preview").innerHTML = "Processing...";
+
+        fetch("/upload", {
+            method: "POST",
+            body: formData
+        })
+        .then(res => res.json())
+        .then(data => {
+            document.getElementById("preview").innerHTML =
+                `<img src="${data.preview_url}?t=${Date.now()}" style="max-width:100%"/>`;
+        });
+
     });
 }
 </script>

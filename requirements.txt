@@ -2,5 +2,5 @@ Flask
 opencv-python-headless
 numpy
 svgwrite
-gunicorn
 scipy
+gunicorn

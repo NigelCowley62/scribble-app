@@ -3,6 +3,9 @@ import numpy as np
 import svgwrite
 from scipy.interpolate import splprep, splev
 
+face_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+)
 
 # -----------------------------
 # PRINT SIZES (mm)
@@ -93,15 +96,31 @@ def add_watermark(image_path):
 # -----------------------------
 # FLOW FIELD POINT GENERATION
 # -----------------------------
-def generate_points(gray, angle, edges, density, chaos):
+def generate_points(gray, angle, edges, density, chaos, faces):
 
     h, w = gray.shape
     points = []
 
+    def in_face(x, y):
+        for (fx, fy, fw, fh) in faces:
+            if fx <= x <= fx + fw and fy <= y <= fy + fh:
+                return True
+        return False
+
     def trace_line(x, y):
         path = []
 
-        for _ in range(100):
+        # 🔥 compute initial tone for stroke length
+        ix0, iy0 = int(x), int(y)
+        if ix0 < 0 or iy0 < 0 or ix0 >= w or iy0 >= h:
+            return path
+
+        tone = 1 - gray[iy0, ix0] / 255
+
+        max_len = int(15 + tone * 60)  # 20–60 depending on tone
+
+        for _ in range(max_len):
+
             ix, iy = int(x), int(y)
 
             if ix < 0 or iy < 0 or ix >= w or iy >= h:
@@ -112,24 +131,52 @@ def generate_points(gray, angle, edges, density, chaos):
             tone = 1 - gray[iy, ix] / 255
             edge_strength = edges[iy, ix] / 255
 
-            # stronger tonal separation
-            tone_weight = tone ** 2.5
+            # -----------------------------
+            # 🔥 TONAL BAND MAPPING (FIXED)
+            # -----------------------------
+            if tone < 0.3:
+                # highlights (very light)
+                weight = tone * 0.3 + edge_strength * 0.4
 
-            # combine tone + edges
-            weight = tone_weight * 0.8 + edge_strength * 0.7
+            elif tone < 0.7:
+                # midtones
+                weight = tone * 0.7 + edge_strength * 0.8
+
+            else:
+                # shadows (boost heavily)
+                weight = (tone ** 2.5) * 2.2 + edge_strength * 1.5
+
+            # face boost
+            if in_face(x, y):
+                weight *= 1.2
+
+            # clamp
+            weight = min(max(weight, 0), 1)
 
             theta = angle[iy, ix] + np.pi / 2
 
             # less chaos in strong features (faces, edges)
-            edge_factor = 1 - edge_strength
 
-            theta += np.random.normal(0, chaos * (0.4 + edge_factor))
+            local_chaos = chaos
+
+            if in_face(x, y):
+                local_chaos *= 0.4   # calmer lines in faces
+
+            noise_scale = local_chaos * (0.6 * (1 - weight) + 0.2)
+            noise_scale = max(noise_scale, 0.001)  # prevent negative/zero
+
+            theta += np.random.normal(0, noise_scale)
 
             # smaller steps in dark areas = more detail
-            step = 0.3 + (1 - weight) * 1.2
-
+            step = 0.1 + (1 - tone) * 0.6
+            
             x += np.cos(theta) * step
             y += np.sin(theta) * step
+
+            # 🔥 linger in dark areas (extra density)
+            if weight > 0.65:
+                x += np.cos(theta) * step * 0.3
+                y += np.sin(theta) * step * 0.3
 
         return path
 
@@ -142,15 +189,34 @@ def generate_points(gray, angle, edges, density, chaos):
         tone = 1 - gray[y, x] / 255
         edge_strength = edges[y, x] / 255
 
-        weight = (tone ** 2) * 0.7 + edge_strength * 0.6
+        # -----------------------------
+        # 🔥 TONAL BIASED SEEDING
+        # -----------------------------
+        if tone < 0.3:
+            prob = tone * 0.2 + edge_strength * 0.3
 
-        if weight > 0.02 and np.random.rand() < weight:
+        elif tone < 0.7:
+            prob = tone * 0.9 + edge_strength * 0.9
+
+        else:
+            prob = (tone ** 2.5) * 1.8 + edge_strength * 1.5
+
+        if in_face(x, y):
+            prob *= 1.2
+
+        prob = min(max(prob, 0), 1)
+
+        if np.random.rand() < prob:
             seeds.append((x, y))
 
+
+    # fallback safety (keep this)
     if len(seeds) < 50:
         for _ in range(200):
             seeds.append((np.random.randint(0, w), np.random.randint(0, h)))
 
+
+    # trace lines
     for s in seeds:
         line = trace_line(s[0], s[1])
         if len(line) > 10:
@@ -190,26 +256,97 @@ def process_image_to_svg(
     img = cv2.resize(img, (new_w, new_h))
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
 
+    # -----------------------------
+    # 🔥 CONTRAST ENHANCEMENT (CLAHE)
+    # -----------------------------
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+
+    # -----------------------------
+    # 🔥 GAMMA (boost darks)
+    # -----------------------------
+    gamma = 0.8  # <1 = darker shadows
+    gray = np.array(255 * (gray / 255) ** gamma, dtype='uint8')
+
+    # face detection AFTER contrast
+    faces = face_cascade.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=5,
+        minSize=(30, 30)
+    )
+
+    # -----------------------------
+    # 🔥 MIDTONE BOOST
+    # -----------------------------
+    gray = np.clip(gray * 1.1, 0, 255).astype(np.uint8)
+
+    # -----------------------------
+    # 🔥 UNSHARP MASK (edge contrast)
+    # -----------------------------
+    blur_small = cv2.GaussianBlur(gray, (0, 0), 1.0)
+    gray = cv2.addWeighted(gray, 1.7, blur_small, -0.7, 0)
+
+    # slight blur for flow field only
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    edges = cv2.Canny(gray, 80, 160)
+    edges = cv2.Canny(gray, 50, 130)
 
     gx = cv2.Sobel(blur, cv2.CV_32F, 1, 0, ksize=5)
     gy = cv2.Sobel(blur, cv2.CV_32F, 0, 1, ksize=5)
     angle = np.arctan2(gy, gx)
 
     # multi-pass
-    points_light = generate_points(gray, angle, edges, int(density * 0.7), chaos * 1.2)
-    points_dark  = generate_points(gray, angle, edges, int(density * 1.3), chaos * 0.6)
+    # -----------------------------
+    # MULTI-LAYER SCRIBBLE (UPGRADED)
+    # -----------------------------
+    points_light = generate_points(
+        gray, angle, edges,
+        int(density * 1.2),
+        chaos * 1.2,
+        faces
+    )
 
-    points = (points_light + points_dark)[::3]
+    points_mid = generate_points(
+        gray, angle, edges,
+        int(density * 1.6),
+        chaos * 0.9,
+        faces
+    )
+
+    points_dark = generate_points(
+        gray, angle, edges,
+        int(density * 2.8),
+        chaos * 0.3,
+        faces
+    )
+
+    # combine layers
+    points = points_light + points_mid + points_dark
+
+    # subsample (controls density / prevents overload)
 
     if len(points) < 50:
         raise ValueError("Not enough points generated")
-
     pts = np.array(points)
+    
+    # 🔥 LIMIT POINT COUNT (prevents freezing)
+    max_points = 14000
+
+    if len(pts) > max_points:
+        tones = 1 - gray[pts[:,1].astype(int), pts[:,0].astype(int)] / 255
+
+        # tone-aware keep probability
+        keep_prob = 0.3 + tones * 0.7
+
+        mask = np.random.rand(len(pts)) < keep_prob
+        pts = pts[mask]
+
+        # hard cap (guarantee performance)
+        if len(pts) > max_points:
+            idx = np.random.choice(len(pts), max_points, replace=False)
+            pts = pts[idx]
 
     # -----------------------------
     # TSP PATH
@@ -233,13 +370,14 @@ def process_image_to_svg(
         used[next_index] = True
         current = next_index
 
+
     # -----------------------------
     # SMOOTH
     # -----------------------------
     pts = np.array(path)
 
     try:
-        tck, _ = splprep([pts[:, 0], pts[:, 1]], s=smoothness * 2)
+        tck, _ = splprep([pts[:, 0], pts[:, 1]], s = smoothness * 0.01)
         u = np.linspace(0, 1, len(pts))
         x, y = splev(u, tck)
         smooth_path = list(zip(x, y))

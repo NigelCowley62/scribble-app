@@ -16,47 +16,47 @@ PRINT_SIZES = {
 
 
 # -----------------------------
-# PREVIEW GENERATION
+# PREVIEW GENERATION (HIGH RES)
 # -----------------------------
 def save_preview_from_path(path, png_path, size="A4", orientation="portrait"):
-    import cv2
-    import numpy as np
 
     pts = np.array(path)
 
-    # get bounds
     min_x, min_y = pts.min(axis=0)
     max_x, max_y = pts.max(axis=0)
 
     data_w = max_x - min_x
     data_h = max_y - min_y
 
-    # avoid zero
     data_w = max(data_w, 1e-6)
     data_h = max(data_h, 1e-6)
 
-    # define base size
-    base = 400
+    # preview resolution (high quality)
+    if size == "A4":
+        base = 1400
+    elif size == "A3":
+        base = 1800
+    elif size == "A2":
+        base = 2200
+    else:
+        base = 2600
 
-    # compute canvas based on ACTUAL orientation
-    if data_w > data_h:
-        # landscape
+    # orientation-aware canvas
+    if orientation == "landscape":
         canvas_w = int(base * (data_w / data_h))
         canvas_h = base
     else:
-        # portrait
         canvas_w = base
         canvas_h = int(base * (data_h / data_w))
 
     img = np.ones((canvas_h, canvas_w, 3), dtype=np.uint8) * 255
 
-    # scale to fit
+    # scale + center
     scale = min(canvas_w / data_w, canvas_h / data_h)
 
     offset_x = (canvas_w - data_w * scale) / 2
     offset_y = (canvas_h - data_h * scale) / 2
 
-    # draw
     for i in range(1, len(pts)):
         x1 = int((pts[i-1][0] - min_x) * scale + offset_x)
         y1 = int((pts[i-1][1] - min_y) * scale + offset_y)
@@ -78,11 +78,11 @@ def add_watermark(image_path):
     cv2.putText(
         overlay,
         "PREVIEW",
-        (40, img.shape[0] // 2),
+        (50, img.shape[0] // 2),
         cv2.FONT_HERSHEY_SIMPLEX,
-        2,
-        (200, 200, 200),
         3,
+        (200, 200, 200),
+        4,
         cv2.LINE_AA
     )
 
@@ -91,7 +91,7 @@ def add_watermark(image_path):
 
 
 # -----------------------------
-# POINT GENERATION
+# FLOW FIELD POINT GENERATION
 # -----------------------------
 def generate_points(gray, angle, edges, density, chaos):
 
@@ -112,16 +112,21 @@ def generate_points(gray, angle, edges, density, chaos):
             tone = 1 - gray[iy, ix] / 255
             edge_strength = edges[iy, ix] / 255
 
-            weight = (tone ** 2) * 0.7 + edge_strength * 0.6
+            # stronger tonal separation
+            tone_weight = tone ** 2.5
+
+            # combine tone + edges
+            weight = tone_weight * 0.8 + edge_strength * 0.7
 
             theta = angle[iy, ix] + np.pi / 2
 
-            if edges[iy, ix] > 0:
-                theta += np.random.normal(0, chaos * 0.3)
-            else:
-                theta += np.random.normal(0, chaos * (0.7 + (1 - weight)))
+            # less chaos in strong features (faces, edges)
+            edge_factor = 1 - edge_strength
 
-            step = 0.4 + (1 - weight)
+            theta += np.random.normal(0, chaos * (0.4 + edge_factor))
+
+            # smaller steps in dark areas = more detail
+            step = 0.3 + (1 - weight) * 1.2
 
             x += np.cos(theta) * step
             y += np.sin(theta) * step
@@ -167,12 +172,22 @@ def process_image_to_svg(
     size="A4",
     orientation="portrait"
 ):
-    print("ORIENTATION:", orientation)
+    
+
     img = cv2.imread(input_path)
     if img is None:
         raise ValueError("Could not load image")
 
-    img = cv2.resize(img, (400, 400))
+    # preserve aspect ratio
+    h, w = img.shape[:2]
+    max_dim = 400
+
+    scale = max_dim / max(h, w)
+
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+
+    img = cv2.resize(img, (new_w, new_h))
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
@@ -189,8 +204,7 @@ def process_image_to_svg(
     points_light = generate_points(gray, angle, edges, int(density * 0.7), chaos * 1.2)
     points_dark  = generate_points(gray, angle, edges, int(density * 1.3), chaos * 0.6)
 
-    points = points_light + points_dark
-    points = points[::3]
+    points = (points_light + points_dark)[::3]
 
     if len(points) < 50:
         raise ValueError("Not enough points generated")
@@ -225,7 +239,7 @@ def process_image_to_svg(
     pts = np.array(path)
 
     try:
-        tck, _ = splprep([pts[:, 0], pts[:, 1]], s=smoothness)
+        tck, _ = splprep([pts[:, 0], pts[:, 1]], s=smoothness * 2)
         u = np.linspace(0, 1, len(pts))
         x, y = splev(u, tck)
         smooth_path = list(zip(x, y))
@@ -233,7 +247,7 @@ def process_image_to_svg(
         smooth_path = path
 
     # -----------------------------
-    # SCALE TO PRINT SIZE
+    # SCALE TO PRINT SIZE (FIXED)
     # -----------------------------
     width_mm, height_mm = PRINT_SIZES.get(size, (210, 297))
 
@@ -241,47 +255,70 @@ def process_image_to_svg(
         width_mm, height_mm = height_mm, width_mm
 
     margin = 10
+
     draw_w = width_mm - 2 * margin
     draw_h = height_mm - 2 * margin
+
+    print("SIZE:", size)
+    print("ORIENTATION:", orientation)
+    print("PAGE MM:", width_mm, height_mm)
+    print("DRAW AREA:", draw_w, draw_h)
+    
 
     pts = np.array(smooth_path)
 
     min_x, min_y = pts.min(axis=0)
     max_x, max_y = pts.max(axis=0)
 
-    norm = (pts - [min_x, min_y]) / (np.array([max_x - min_x, max_y - min_y]) + 1e-6)
+    data_w = max_x - min_x
+    data_h = max_y - min_y
+
+    data_w = max(data_w, 1e-6)
+    data_h = max(data_h, 1e-6)
+
+    # preserve aspect ratio
+    scale = min(draw_w / data_w, draw_h / data_h)
+
+    offset_x = margin + (draw_w - data_w * scale) / 2
+    offset_y = margin + (draw_h - data_h * scale) / 2
 
     scaled = []
-    for x, y in norm:
-        px = margin + x * draw_w
-        py = margin + y * draw_h
+    for x, y in pts:
+        px = (x - min_x) * scale + offset_x
+        py = (y - min_y) * scale + offset_y
         scaled.append((px, py))
+
+    print("FIRST SCALED POINT:", scaled[0])
 
     # -----------------------------
     # SAVE SVG
     # -----------------------------
-    dwg = svgwrite.Drawing(
-        output_path,
-        size=(f"{width_mm}mm", f"{height_mm}mm")
-    )
+    dwg = svgwrite.Drawing(output_path)
+
+    # 🔥 CRITICAL: define coordinate system properly
+    dwg.viewbox(0, 0, width_mm, height_mm)
+
+    # physical size
+    dwg['width'] = f"{width_mm}mm"
+    dwg['height'] = f"{height_mm}mm"
 
     dwg.add(dwg.polyline(
         scaled,
         stroke="black",
         fill="none",
-        stroke_width=0.3
+        stroke_width=0.2
     ))
 
     dwg.save()
 
     # -----------------------------
-    # SAVE PREVIEW
+    # SAVE PREVIEW (MATCH SVG)
     # -----------------------------
     png_path = output_path.replace(".svg", ".png")
 
     save_preview_from_path(
-    scaled,
-    png_path,
-    size=size,
-    orientation=orientation
-)
+        scaled,
+        png_path,
+        size=size,
+        orientation=orientation
+    )

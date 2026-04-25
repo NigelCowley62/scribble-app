@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, send_file, jsonify
 import os
+import uuid
 from processor import process_image_to_svg, add_watermark
 
 app = Flask(__name__)
@@ -29,24 +30,25 @@ def index():
 def upload():
     file = request.files["image"]
 
-    # sliders
     density = int(request.form.get("density", 1200))
     smooth = float(request.form.get("smooth", 5))
     chaos = float(request.form.get("chaos", 0.2))
 
-    # optional UI inputs (not used yet)
     size = request.form.get("size", "A4")
-    orientation = request.form.get("orientation", "portrait")
-    print("FORM ORIENTATION:", orientation)
+    orientation = request.form.get("orientation", "portrait").lower()
 
-    # save uploaded image
-    input_path = os.path.join(UPLOAD_FOLDER, file.filename)
+    # generate unique job id
+    job_id = str(uuid.uuid4())
+
+    input_path = f"uploads/{job_id}.png"
+    output_svg = f"outputs/{job_id}.svg"
+    output_png = f"outputs/{job_id}.png"
+
     file.save(input_path)
 
-    # run processor (creates SVG + PNG)
     process_image_to_svg(
         input_path,
-        OUTPUT_SVG,
+        output_svg,
         density=density,
         smoothness=smooth,
         chaos=chaos,
@@ -54,27 +56,28 @@ def upload():
         orientation=orientation
     )
 
-    # add watermark to preview
-    add_watermark(OUTPUT_PNG)
+    add_watermark(output_png)
 
-    # return preview
-    return jsonify({"preview_url": "/preview"})
+    return jsonify({
+        "preview_url": f"/preview/{job_id}",
+        "download_url": f"/download/{job_id}"
+    })
 
 
 # -----------------------------
 # SERVE PREVIEW
 # -----------------------------
-@app.route("/preview")
-def preview():
-    return send_file(OUTPUT_PNG, mimetype="image/png")
+@app.route("/preview/<job_id>")
+def preview(job_id):
+    return send_file(f"outputs/{job_id}.png", mimetype="image/png")
 
 
 # -----------------------------
 # OPTIONAL DOWNLOAD (for testing)
 # -----------------------------
-@app.route("/download")
-def download():
-    return send_file(OUTPUT_SVG, as_attachment=True)
+@app.route("/download/<job_id>")
+def download(job_id):
+    return send_file(f"outputs/{job_id}.svg", as_attachment=True)
 
 
 # -----------------------------

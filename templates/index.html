@@ -76,13 +76,13 @@
         </div>
 
         <label>Line Density</label>
-        <input type="range" id="density" min="500" max="3000" value="1200">
+        <input type="range" id="density" min="500" max="3000" value="2000">
 
         <label>Smoothness</label>
-        <input type="range" id="smooth" min="1" max="20" value="5">
+        <input type="range" id="smooth" min="1" max="20" value="8">
 
         <label>Chaos</label>
-        <input type="range" id="chaos" min="0" max="1" step="0.1" value="0.2">
+        <input type="range" id="chaos" min="0" max="1" step="0.1" value="0.15">
 
         <label>Paper Size</label>
         <select id="size">
@@ -199,7 +199,12 @@ function upload() {
         .then(res => res.json())
         .then(data => {
             document.getElementById("preview").innerHTML =
-                `<img src="${data.preview_url}?t=${Date.now()}" style="max-width:100%"/>`;
+                `
+                <img src="${data.preview_url}?t=${Date.now()}" style="width:100%; height:auto;"/>
+                <br><br>
+                <a href="${data.download_url}" target="_blank">Download SVG</a>
+                `;
+            
         });
 
     });

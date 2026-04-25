@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+uploads/
+output.svg
+output.png
+.env

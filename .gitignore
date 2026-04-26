@@ -3,4 +3,11 @@ __pycache__/
 uploads/
 output.svg
 output.png
-.env
+.env"*.png" 
+"*.svg" 
+"uploads/" 
+"outputs/" 
+"*.png" 
+"*.svg" 
+"uploads/" 
+"outputs/" 

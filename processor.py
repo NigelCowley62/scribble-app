@@ -174,9 +174,14 @@ def generate_points(gray, angle, edges, density, chaos, faces):
             y += np.sin(theta) * step
 
             # 🔥 linger in dark areas (extra density)
-            if weight > 0.65:
-                x += np.cos(theta) * step * 0.3
-                y += np.sin(theta) * step * 0.3
+            if weight > 0.6:
+                linger = int(2 + weight * 6)  # 2–8 extra micro-steps
+
+                for _ in range(linger):
+                    jitter_theta = theta + np.random.normal(0, 0.15)
+                    x += np.cos(jitter_theta) * step * 0.25
+                    y += np.sin(jitter_theta) * step * 0.25
+                    path.append((x, y))
 
         return path
 
@@ -332,13 +337,16 @@ def process_image_to_svg(
     pts = np.array(points)
     
     # 🔥 LIMIT POINT COUNT (prevents freezing)
-    max_points = 14000
+    max_points = 25000
 
     if len(pts) > max_points:
-        tones = 1 - gray[pts[:,1].astype(int), pts[:,0].astype(int)] / 255
+        ix = np.clip(pts[:, 0].astype(int), 0, gray.shape[1] - 1)
+        iy = np.clip(pts[:, 1].astype(int), 0, gray.shape[0] - 1)
+
+        tones = 1 - gray[iy, ix] / 255
 
         # tone-aware keep probability
-        keep_prob = 0.3 + tones * 0.7
+        keep_prob = 0.2 + tones**1.5 * 0.9
 
         mask = np.random.rand(len(pts)) < keep_prob
         pts = pts[mask]
@@ -364,7 +372,24 @@ def process_image_to_svg(
         dists = np.sum((pts - current_point) ** 2, axis=1).astype(float)
         dists[used] = np.inf
 
-        next_index = np.argmin(dists)
+        k = 5
+        nearest = np.argsort(dists)[:k]
+
+        nearest_dists = dists[nearest]
+
+        # prevent divide-by-zero
+        min_dist = np.min(nearest_dists)
+        if min_dist < 1e-6:
+            min_dist = 1e-6
+
+        weights = np.exp(-nearest_dists / min_dist)
+
+        # fallback if things still go weird
+        if not np.isfinite(weights).all() or weights.sum() == 0:
+            next_index = nearest[0]  # fallback to nearest
+        else:
+            weights /= weights.sum()
+            next_index = np.random.choice(nearest, p=weights)
 
         path.append(tuple(pts[next_index]))
         used[next_index] = True
@@ -377,8 +402,8 @@ def process_image_to_svg(
     pts = np.array(path)
 
     try:
-        tck, _ = splprep([pts[:, 0], pts[:, 1]], s = smoothness * 0.01)
-        u = np.linspace(0, 1, len(pts))
+        tck, _ = splprep([pts[:, 0], pts[:, 1]], s = smoothness * 0.03)
+        u = np.linspace(0, 1, len(pts) * 4)
         x, y = splev(u, tck)
         smooth_path = list(zip(x, y))
     except:
@@ -444,7 +469,7 @@ def process_image_to_svg(
         scaled,
         stroke="black",
         fill="none",
-        stroke_width=0.2
+        stroke_width=0.25
     ))
 
     dwg.save()

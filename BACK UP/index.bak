@@ -55,61 +55,12 @@
         img {
             max-width: 100%;
         }
-
-        /* 🔥 PREVIEW FIX (no scrolling) */
-        #preview img {
-            max-width: 100%;
-            max-height: 70vh;
-            object-fit: contain;
-        }
-
-        /* 🔥 LOADING OVERLAY */
-        #loadingOverlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(255,255,255,0.9);
-            display: none;
-            align-items: center;
-            justify-content: center;
-            flex-direction: column;
-            z-index: 999;
-        }
-
-        .spinner {
-            border: 6px solid #eee;
-            border-top: 6px solid black;
-            border-radius: 50%;
-            width: 50px;
-            height: 50px;
-            animation: spin 1s linear infinite;
-        }
-
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-
-        #loadingText {
-            margin-top: 20px;
-            font-size: 16px;
-            color: #333;
-        }
-
     </style>
 </head>
 
 <body>
 
 <h1>Plotter Art Generator</h1>
-
-<!-- 🔥 LOADING OVERLAY -->
-<div id="loadingOverlay">
-    <div class="spinner"></div>
-    <div id="loadingText">Thinking...</div>
-</div>
 
 <div class="container">
 
@@ -119,6 +70,7 @@
         <label>Upload Image</label>
         <input type="file" id="fileInput">
 
+        <!-- CROPPER AREA -->
         <div class="image-container">
             <img id="image">
         </div>
@@ -166,28 +118,6 @@ let cropper;
 const imageInput = document.getElementById("fileInput");
 const image = document.getElementById("image");
 
-// 🔥 HUMOUR BANK (16 lines)
-const loadingMessages = [
-    "Teaching the robot to draw...",
-    "Untangling artistic spaghetti...",
-    "Summoning creative chaos...",
-    "Consulting the scribble oracle...",
-    "Plotting questionable decisions...",
-    "Turning pixels into pen strokes...",
-    "Convincing lines to behave...",
-    "Sharpening imaginary pencils...",
-    "Overthinking your image...",
-    "Adding unnecessary complexity...",
-    "Reinventing art history...",
-    "Channeling inner Picasso...",
-    "Making it look better from afar...",
-    "Squint test in progress...",
-    "Applying advanced scribble science...",
-    "Probably worth the wait..."
-];
-
-let loadingInterval;
-
 // -----------------------------
 // LOAD IMAGE + INIT CROPPER
 // -----------------------------
@@ -213,36 +143,21 @@ imageInput.addEventListener("change", function(e) {
 });
 
 // -----------------------------
+// ASPECT RATIO (A SERIES)
+// -----------------------------
 function getAspectRatio() {
     const orientation = document.getElementById("orientation").value;
     return orientation === "portrait" ? (1 / 1.414) : 1.414;
 }
 
+// -----------------------------
+// UPDATE ON ORIENTATION CHANGE
+// -----------------------------
 document.getElementById("orientation").addEventListener("change", () => {
     if (cropper) {
         cropper.setAspectRatio(getAspectRatio());
     }
 });
-
-// -----------------------------
-// LOADING CONTROL
-// -----------------------------
-function startLoading() {
-    const overlay = document.getElementById("loadingOverlay");
-    const text = document.getElementById("loadingText");
-
-    overlay.style.display = "flex";
-
-    loadingInterval = setInterval(() => {
-        const msg = loadingMessages[Math.floor(Math.random() * loadingMessages.length)];
-        text.innerText = msg;
-    }, 2000);
-}
-
-function stopLoading() {
-    document.getElementById("loadingOverlay").style.display = "none";
-    clearInterval(loadingInterval);
-}
 
 // -----------------------------
 // UPLOAD CROPPED IMAGE
@@ -253,8 +168,6 @@ function upload() {
         alert("Please upload and crop an image first");
         return;
     }
-
-    startLoading();
 
     const canvas = cropper.getCroppedCanvas({
         width: 400,
@@ -277,24 +190,21 @@ function upload() {
         formData.append("size", size);
         formData.append("orientation", orientation);
 
+        document.getElementById("preview").innerHTML = "Processing...";
+
         fetch("/upload", {
             method: "POST",
             body: formData
         })
         .then(res => res.json())
         .then(data => {
-            stopLoading();
-
             document.getElementById("preview").innerHTML =
                 `
-                <img src="${data.preview_url}?t=${Date.now()}"/>
+                <img src="${data.preview_url}?t=${Date.now()}" style="width:100%; height:auto;"/>
                 <br><br>
                 <a href="${data.download_url}" target="_blank">Download SVG</a>
                 `;
-        })
-        .catch(err => {
-            stopLoading();
-            alert("Something went wrong");
+            
         });
 
     });

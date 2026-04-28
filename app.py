@@ -32,7 +32,8 @@ def upload():
 
     density = int(request.form.get("density", 1200))
     smooth = float(request.form.get("smooth", 5))
-    chaos = float(request.form.get("chaos", 0.2))
+    chaos_raw = float(request.form.get("chaos", 0.2))
+    chaos = chaos_raw ** 1.5
 
     size = request.form.get("size", "A4")
     orientation = request.form.get("orientation", "portrait").lower()

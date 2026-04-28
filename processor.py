@@ -3,6 +3,9 @@ import numpy as np
 import svgwrite
 from scipy.interpolate import splprep, splev
 
+# -----------------------------
+# FACE DETECTOR
+# -----------------------------
 face_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
 )
@@ -17,9 +20,41 @@ PRINT_SIZES = {
     "A1": (594, 841),
 }
 
+# -----------------------------
+# WATERMARK (SUBTLE)
+# -----------------------------
+def add_watermark(image_path):
+    img = cv2.imread(image_path)
+    if img is None:
+        return
+
+    overlay = img.copy()
+    h, w = img.shape[:2]
+
+    text = "PREVIEW"
+    font_scale = w / 800
+    thickness = max(1, int(font_scale * 2))
+
+    x = int(w * 0.15)
+    y = int(h * 0.7)
+
+    cv2.putText(
+        overlay,
+        text,
+        (x, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        (200, 200, 200),
+        thickness,
+        cv2.LINE_AA
+    )
+
+    cv2.addWeighted(overlay, 0.25, img, 0.75, 0, img)
+    cv2.imwrite(image_path, img)
+
 
 # -----------------------------
-# PREVIEW GENERATION (HIGH RES)
+# PREVIEW
 # -----------------------------
 def save_preview_from_path(path, png_path, size="A4", orientation="portrait"):
 
@@ -28,23 +63,11 @@ def save_preview_from_path(path, png_path, size="A4", orientation="portrait"):
     min_x, min_y = pts.min(axis=0)
     max_x, max_y = pts.max(axis=0)
 
-    data_w = max_x - min_x
-    data_h = max_y - min_y
+    data_w = max(max_x - min_x, 1e-6)
+    data_h = max(max_y - min_y, 1e-6)
 
-    data_w = max(data_w, 1e-6)
-    data_h = max(data_h, 1e-6)
+    base = {"A4":1400, "A3":1800, "A2":2200}.get(size, 2600)
 
-    # preview resolution (high quality)
-    if size == "A4":
-        base = 1400
-    elif size == "A3":
-        base = 1800
-    elif size == "A2":
-        base = 2200
-    else:
-        base = 2600
-
-    # orientation-aware canvas
     if orientation == "landscape":
         canvas_w = int(base * (data_w / data_h))
         canvas_h = base
@@ -54,47 +77,24 @@ def save_preview_from_path(path, png_path, size="A4", orientation="portrait"):
 
     img = np.ones((canvas_h, canvas_w, 3), dtype=np.uint8) * 255
 
-    # scale + center
     scale = min(canvas_w / data_w, canvas_h / data_h)
 
-    offset_x = (canvas_w - data_w * scale) / 2
-    offset_y = (canvas_h - data_h * scale) / 2
+    ox = (canvas_w - data_w * scale) / 2
+    oy = (canvas_h - data_h * scale) / 2
 
     for i in range(1, len(pts)):
-        x1 = int((pts[i-1][0] - min_x) * scale + offset_x)
-        y1 = int((pts[i-1][1] - min_y) * scale + offset_y)
-        x2 = int((pts[i][0] - min_x) * scale + offset_x)
-        y2 = int((pts[i][1] - min_y) * scale + offset_y)
+        x1 = int((pts[i-1][0] - min_x) * scale + ox)
+        y1 = int((pts[i-1][1] - min_y) * scale + oy)
+        x2 = int((pts[i][0] - min_x) * scale + ox)
+        y2 = int((pts[i][1] - min_y) * scale + oy)
 
-        cv2.line(img, (x1, y1), (x2, y2), (0, 0, 0), 1)
+        cv2.line(img, (x1, y1), (x2, y2), (0,0,0), 1)
 
     cv2.imwrite(png_path, img)
 
 
 # -----------------------------
-# WATERMARK
-# -----------------------------
-def add_watermark(image_path):
-    img = cv2.imread(image_path)
-    overlay = img.copy()
-
-    cv2.putText(
-        overlay,
-        "PREVIEW",
-        (50, img.shape[0] // 2),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        3,
-        (200, 200, 200),
-        4,
-        cv2.LINE_AA
-    )
-
-    cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
-    cv2.imwrite(image_path, img)
-
-
-# -----------------------------
-# FLOW FIELD POINT GENERATION
+# FLOW FIELD (TSP-OPTIMISED)
 # -----------------------------
 def generate_points(gray, angle, edges, density, chaos, faces):
 
@@ -110,19 +110,18 @@ def generate_points(gray, angle, edges, density, chaos, faces):
     def trace_line(x, y):
         path = []
 
-        # 🔥 compute initial tone for stroke length
         ix0, iy0 = int(x), int(y)
         if ix0 < 0 or iy0 < 0 or ix0 >= w or iy0 >= h:
             return path
 
-        tone = 1 - gray[iy0, ix0] / 255
+        tone0 = 1 - gray[iy0, ix0] / 255
 
-        max_len = int(15 + tone * 60)  # 20–60 depending on tone
+        # 🔥 longer flowing strokes
+        max_len = int(25 + tone0 * 80 + np.random.randint(0, 30))
 
         for _ in range(max_len):
 
             ix, iy = int(x), int(y)
-
             if ix < 0 or iy < 0 or ix >= w or iy >= h:
                 break
 
@@ -131,56 +130,43 @@ def generate_points(gray, angle, edges, density, chaos, faces):
             tone = 1 - gray[iy, ix] / 255
             edge_strength = edges[iy, ix] / 255
 
-            # -----------------------------
-            # 🔥 TONAL BAND MAPPING (FIXED)
-            # -----------------------------
-            if tone < 0.3:
-                # highlights (very light)
-                weight = tone * 0.3 + edge_strength * 0.4
+            weight = (tone ** 3.0) * 2.0 + edge_strength * 1.6
 
-            elif tone < 0.7:
-                # midtones
-                weight = tone * 0.7 + edge_strength * 0.8
-
-            else:
-                # shadows (boost heavily)
-                weight = (tone ** 2.5) * 2.2 + edge_strength * 1.5
-
-            # face boost
             if in_face(x, y):
                 weight *= 1.2
 
-            # clamp
             weight = min(max(weight, 0), 1)
 
             theta = angle[iy, ix] + np.pi / 2
 
-            # less chaos in strong features (faces, edges)
-
-            local_chaos = chaos
+            # 🔥 smoother chaos (less noisy)
+            local_chaos = chaos * (0.6 + tone * 1.2)
+            local_chaos *= (0.85 + np.random.rand() * 0.3)
 
             if in_face(x, y):
-                local_chaos *= 0.4   # calmer lines in faces
+                local_chaos *= 0.4
 
-            noise_scale = local_chaos * (0.6 * (1 - weight) + 0.2)
-            noise_scale = max(noise_scale, 0.001)  # prevent negative/zero
+            theta += np.random.normal(0, local_chaos)
 
-            theta += np.random.normal(0, noise_scale)
+            # subtle wobble (kept small)
+            theta += np.sin(ix * 0.05 + iy * 0.05) * 0.15
 
-            # smaller steps in dark areas = more detail
-            step = 0.1 + (1 - tone) * 0.6
-            
+            # 🔥 slightly larger step = more flow
+            step = 0.08 + (1 - tone) * 0.7
+
             x += np.cos(theta) * step
             y += np.sin(theta) * step
 
-            # 🔥 linger in dark areas (extra density)
+            # 🔥 light overlap (not scribbly)
             if weight > 0.6:
-                linger = int(2 + weight * 6)  # 2–8 extra micro-steps
+                repeats = int(1 + tone * 2)
 
-                for _ in range(linger):
-                    jitter_theta = theta + np.random.normal(0, 0.15)
-                    x += np.cos(jitter_theta) * step * 0.25
-                    y += np.sin(jitter_theta) * step * 0.25
+                for _ in range(repeats):
+                    jitter = np.random.normal(0, 0.2)
+
+                    x += np.cos(theta + jitter) * step * 0.4
+                    y += np.sin(theta + jitter) * step * 0.4
+
                     path.append((x, y))
 
         return path
@@ -194,17 +180,10 @@ def generate_points(gray, angle, edges, density, chaos, faces):
         tone = 1 - gray[y, x] / 255
         edge_strength = edges[y, x] / 255
 
-        # -----------------------------
-        # 🔥 TONAL BIASED SEEDING
-        # -----------------------------
-        if tone < 0.3:
-            prob = tone * 0.2 + edge_strength * 0.3
+        prob = (tone ** 2.8) * 2.0 + edge_strength * 1.4
 
-        elif tone < 0.7:
-            prob = tone * 0.9 + edge_strength * 0.9
-
-        else:
-            prob = (tone ** 2.5) * 1.8 + edge_strength * 1.5
+        # slight randomness (not too much)
+        prob *= (0.9 + np.random.rand() * 0.2)
 
         if in_face(x, y):
             prob *= 1.2
@@ -214,14 +193,9 @@ def generate_points(gray, angle, edges, density, chaos, faces):
         if np.random.rand() < prob:
             seeds.append((x, y))
 
-
-    # fallback safety (keep this)
     if len(seeds) < 50:
-        for _ in range(200):
-            seeds.append((np.random.randint(0, w), np.random.randint(0, h)))
+        seeds += [(np.random.randint(0, w), np.random.randint(0, h)) for _ in range(200)]
 
-
-    # trace lines
     for s in seeds:
         line = trace_line(s[0], s[1])
         if len(line) > 10:
@@ -232,7 +206,7 @@ def generate_points(gray, angle, edges, density, chaos, faces):
 
 
 # -----------------------------
-# MAIN PROCESS
+# MAIN
 # -----------------------------
 def process_image_to_svg(
     input_path,
@@ -243,57 +217,27 @@ def process_image_to_svg(
     size="A4",
     orientation="portrait"
 ):
-    
 
     img = cv2.imread(input_path)
     if img is None:
         raise ValueError("Could not load image")
 
-    # preserve aspect ratio
     h, w = img.shape[:2]
-    max_dim = 400
-
-    scale = max_dim / max(h, w)
-
-    new_w = int(w * scale)
-    new_h = int(h * scale)
-
-    img = cv2.resize(img, (new_w, new_h))
+    scale = 400 / max(h, w)
+    img = cv2.resize(img, (int(w * scale), int(h * scale)))
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # -----------------------------
-    # 🔥 CONTRAST ENHANCEMENT (CLAHE)
-    # -----------------------------
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
     gray = clahe.apply(gray)
 
-    # -----------------------------
-    # 🔥 GAMMA (boost darks)
-    # -----------------------------
-    gamma = 0.8  # <1 = darker shadows
+    gamma = 0.8
     gray = np.array(255 * (gray / 255) ** gamma, dtype='uint8')
 
-    # face detection AFTER contrast
-    faces = face_cascade.detectMultiScale(
-        gray,
-        scaleFactor=1.1,
-        minNeighbors=5,
-        minSize=(30, 30)
-    )
+    faces = face_cascade.detectMultiScale(gray, 1.1, 5)
 
-    # -----------------------------
-    # 🔥 MIDTONE BOOST
-    # -----------------------------
     gray = np.clip(gray * 1.1, 0, 255).astype(np.uint8)
 
-    # -----------------------------
-    # 🔥 UNSHARP MASK (edge contrast)
-    # -----------------------------
-    blur_small = cv2.GaussianBlur(gray, (0, 0), 1.0)
-    gray = cv2.addWeighted(gray, 1.7, blur_small, -0.7, 0)
-
-    # slight blur for flow field only
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
     edges = cv2.Canny(gray, 50, 130)
@@ -302,186 +246,105 @@ def process_image_to_svg(
     gy = cv2.Sobel(blur, cv2.CV_32F, 0, 1, ksize=5)
     angle = np.arctan2(gy, gx)
 
-    # multi-pass
-    # -----------------------------
-    # MULTI-LAYER SCRIBBLE (UPGRADED)
-    # -----------------------------
-    points_light = generate_points(
-        gray, angle, edges,
-        int(density * 1.2),
-        chaos * 1.2,
-        faces
+    # multi-layer (kept, but balanced)
+    points = (
+        generate_points(gray, angle, edges, int(density * 1.2), chaos * 1.1, faces) +
+        generate_points(gray, angle, edges, int(density * 1.5), chaos * 0.9, faces) +
+        generate_points(gray, angle, edges, int(density * 1.8), chaos * 0.5, faces)
     )
 
-    points_mid = generate_points(
-        gray, angle, edges,
-        int(density * 1.6),
-        chaos * 0.9,
-        faces
-    )
-
-    points_dark = generate_points(
-        gray, angle, edges,
-        int(density * 2.8),
-        chaos * 0.3,
-        faces
-    )
-
-    # combine layers
-    points = points_light + points_mid + points_dark
-
-    # subsample (controls density / prevents overload)
-
-    if len(points) < 50:
-        raise ValueError("Not enough points generated")
     pts = np.array(points)
-    
-    # 🔥 LIMIT POINT COUNT (prevents freezing)
-    max_points = 25000
 
-    if len(pts) > max_points:
-        ix = np.clip(pts[:, 0].astype(int), 0, gray.shape[1] - 1)
-        iy = np.clip(pts[:, 1].astype(int), 0, gray.shape[0] - 1)
+    MAX_POINTS = min(int(density * 10), 22000)
 
-        tones = 1 - gray[iy, ix] / 255
-
-        # tone-aware keep probability
-        keep_prob = 0.2 + tones**1.5 * 0.9
-
-        mask = np.random.rand(len(pts)) < keep_prob
-        pts = pts[mask]
-
-        # hard cap (guarantee performance)
-        if len(pts) > max_points:
-            idx = np.random.choice(len(pts), max_points, replace=False)
-            pts = pts[idx]
+    if len(pts) > MAX_POINTS:
+        idx = np.random.choice(len(pts), MAX_POINTS, replace=False)
+        pts = pts[idx]
 
     # -----------------------------
-    # TSP PATH
+    # TSP (SMOOTHER PATH)
     # -----------------------------
     used = np.zeros(len(pts), dtype=bool)
     path = []
-    current = 0
 
+    current = np.random.randint(len(pts))
     path.append(tuple(pts[current]))
     used[current] = True
 
-    for _ in range(len(pts) - 1):
-        current_point = pts[current]
+    k = 12
 
-        dists = np.sum((pts - current_point) ** 2, axis=1).astype(float)
+    for _ in range(len(pts) - 1):
+
+        dists = np.sum((pts - pts[current])**2, axis=1).astype(float)
         dists[used] = np.inf
 
-        k = 5
-        nearest = np.argsort(dists)[:k]
+        nearest = np.argpartition(dists, k)[:k]
+        nearest = nearest[np.isfinite(dists[nearest])]
 
-        nearest_dists = dists[nearest]
+        if len(nearest) == 0:
+            break
 
-        # prevent divide-by-zero
-        min_dist = np.min(nearest_dists)
-        if min_dist < 1e-6:
-            min_dist = 1e-6
+        local = dists[nearest]
+        local[local == 0] = 1e-6
 
-        weights = np.exp(-nearest_dists / min_dist)
+        # 🔥 smoother selection (less jumpy)
+        weights = 1 / (local + 1e-6)
+        weights /= np.sum(weights)
 
-        # fallback if things still go weird
-        if not np.isfinite(weights).all() or weights.sum() == 0:
-            next_index = nearest[0]  # fallback to nearest
-        else:
-            weights /= weights.sum()
-            next_index = np.random.choice(nearest, p=weights)
+        next_index = np.random.choice(nearest, p=weights)
 
         path.append(tuple(pts[next_index]))
         used[next_index] = True
         current = next_index
 
-
-    # -----------------------------
-    # SMOOTH
-    # -----------------------------
     pts = np.array(path)
 
+    if len(pts) > 6000:
+        pts = pts[::2]
+
     try:
-        tck, _ = splprep([pts[:, 0], pts[:, 1]], s = smoothness * 0.03)
-        u = np.linspace(0, 1, len(pts) * 4)
+        tck, _ = splprep([pts[:,0], pts[:,1]], s=smoothness * 0.05)
+        u = np.linspace(0, 1, len(pts))
         x, y = splev(u, tck)
         smooth_path = list(zip(x, y))
     except:
         smooth_path = path
 
-    # -----------------------------
-    # SCALE TO PRINT SIZE (FIXED)
-    # -----------------------------
     width_mm, height_mm = PRINT_SIZES.get(size, (210, 297))
 
     if orientation == "landscape":
         width_mm, height_mm = height_mm, width_mm
-
-    margin = 10
-
-    draw_w = width_mm - 2 * margin
-    draw_h = height_mm - 2 * margin
-
-    print("SIZE:", size)
-    print("ORIENTATION:", orientation)
-    print("PAGE MM:", width_mm, height_mm)
-    print("DRAW AREA:", draw_w, draw_h)
-    
 
     pts = np.array(smooth_path)
 
     min_x, min_y = pts.min(axis=0)
     max_x, max_y = pts.max(axis=0)
 
-    data_w = max_x - min_x
-    data_h = max_y - min_y
+    scale = min(
+        (width_mm - 20) / (max_x - min_x),
+        (height_mm - 20) / (max_y - min_y)
+    )
 
-    data_w = max(data_w, 1e-6)
-    data_h = max(data_h, 1e-6)
+    scaled = [
+        ((x - min_x) * scale + 10, (y - min_y) * scale + 10)
+        for x, y in pts
+    ]
 
-    # preserve aspect ratio
-    scale = min(draw_w / data_w, draw_h / data_h)
-
-    offset_x = margin + (draw_w - data_w * scale) / 2
-    offset_y = margin + (draw_h - data_h * scale) / 2
-
-    scaled = []
-    for x, y in pts:
-        px = (x - min_x) * scale + offset_x
-        py = (y - min_y) * scale + offset_y
-        scaled.append((px, py))
-
-    print("FIRST SCALED POINT:", scaled[0])
-
-    # -----------------------------
-    # SAVE SVG
-    # -----------------------------
     dwg = svgwrite.Drawing(output_path)
-
-    # 🔥 CRITICAL: define coordinate system properly
     dwg.viewbox(0, 0, width_mm, height_mm)
-
-    # physical size
-    dwg['width'] = f"{width_mm}mm"
-    dwg['height'] = f"{height_mm}mm"
 
     dwg.add(dwg.polyline(
         scaled,
         stroke="black",
         fill="none",
-        stroke_width=0.25
+        stroke_width=0.2
     ))
 
     dwg.save()
 
-    # -----------------------------
-    # SAVE PREVIEW (MATCH SVG)
-    # -----------------------------
-    png_path = output_path.replace(".svg", ".png")
-
     save_preview_from_path(
         scaled,
-        png_path,
+        output_path.replace(".svg", ".png"),
         size=size,
         orientation=orientation
     )

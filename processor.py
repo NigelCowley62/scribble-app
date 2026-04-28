@@ -94,7 +94,7 @@ def save_preview_from_path(path, png_path, size="A4", orientation="portrait"):
 
 
 # -----------------------------
-# FLOW FIELD (TSP-OPTIMISED)
+# FLOW FIELD
 # -----------------------------
 def generate_points(gray, angle, edges, density, chaos, faces):
 
@@ -115,8 +115,6 @@ def generate_points(gray, angle, edges, density, chaos, faces):
             return path
 
         tone0 = 1 - gray[iy0, ix0] / 255
-
-        # 🔥 longer flowing strokes
         max_len = int(25 + tone0 * 80 + np.random.randint(0, 30))
 
         for _ in range(max_len):
@@ -139,7 +137,9 @@ def generate_points(gray, angle, edges, density, chaos, faces):
 
             theta = angle[iy, ix] + np.pi / 2
 
-            # 🔥 smoother chaos (less noisy)
+            if edge_strength > 0.25:
+                theta = angle[iy, ix] + np.pi / 2
+
             local_chaos = chaos * (0.6 + tone * 1.2)
             local_chaos *= (0.85 + np.random.rand() * 0.3)
 
@@ -148,26 +148,16 @@ def generate_points(gray, angle, edges, density, chaos, faces):
 
             theta += np.random.normal(0, local_chaos)
 
-            # subtle wobble (kept small)
-            theta += np.sin(ix * 0.05 + iy * 0.05) * 0.15
-
-            # 🔥 slightly larger step = more flow
-            step = 0.08 + (1 - tone) * 0.7
+            step = 0.04 + (1 - tone) * 0.7
 
             x += np.cos(theta) * step
             y += np.sin(theta) * step
 
-            # 🔥 light overlap (not scribbly)
             if weight > 0.6:
-                repeats = int(1 + tone * 2)
-
-                for _ in range(repeats):
-                    jitter = np.random.normal(0, 0.2)
-
-                    x += np.cos(theta + jitter) * step * 0.4
-                    y += np.sin(theta + jitter) * step * 0.4
-
-                    path.append((x, y))
+                for _ in range(2):
+                    jitter_x = x + np.random.normal(0, 0.3)
+                    jitter_y = y + np.random.normal(0, 0.3)
+                    path.append((jitter_x, jitter_y))
 
         return path
 
@@ -180,10 +170,7 @@ def generate_points(gray, angle, edges, density, chaos, faces):
         tone = 1 - gray[y, x] / 255
         edge_strength = edges[y, x] / 255
 
-        prob = (tone ** 2.8) * 2.0 + edge_strength * 1.4
-
-        # slight randomness (not too much)
-        prob *= (0.9 + np.random.rand() * 0.2)
+        prob = (tone ** 3.0) * 2.0 + edge_strength * 2.0
 
         if in_face(x, y):
             prob *= 1.2
@@ -238,15 +225,25 @@ def process_image_to_svg(
 
     gray = np.clip(gray * 1.1, 0, 255).astype(np.uint8)
 
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-
     edges = cv2.Canny(gray, 50, 130)
 
-    gx = cv2.Sobel(blur, cv2.CV_32F, 1, 0, ksize=5)
-    gy = cv2.Sobel(blur, cv2.CV_32F, 0, 1, ksize=5)
-    angle = np.arctan2(gy, gx)
+    # 🔥 MULTI-SCALE FLOW FIELD
+    blur_small = cv2.GaussianBlur(gray, (3, 3), 0)
+    blur_large = cv2.GaussianBlur(gray, (11, 11), 0)
 
-    # multi-layer (kept, but balanced)
+    gx_small = cv2.Sobel(blur_small, cv2.CV_32F, 1, 0, ksize=3)
+    gy_small = cv2.Sobel(blur_small, cv2.CV_32F, 0, 1, ksize=3)
+
+    gx_large = cv2.Sobel(blur_large, cv2.CV_32F, 1, 0, ksize=5)
+    gy_large = cv2.Sobel(blur_large, cv2.CV_32F, 0, 1, ksize=5)
+
+    angle_small = np.arctan2(gy_small, gx_small)
+    angle_large = np.arctan2(gy_large, gx_large)
+
+    edge_norm = edges / 255.0
+    angle = angle_small * edge_norm + angle_large * (1 - edge_norm)
+
+    # generate points
     points = (
         generate_points(gray, angle, edges, int(density * 1.2), chaos * 1.1, faces) +
         generate_points(gray, angle, edges, int(density * 1.5), chaos * 0.9, faces) +
@@ -256,13 +253,15 @@ def process_image_to_svg(
     pts = np.array(points)
 
     MAX_POINTS = min(int(density * 10), 22000)
-
     if len(pts) > MAX_POINTS:
         idx = np.random.choice(len(pts), MAX_POINTS, replace=False)
         pts = pts[idx]
 
+    # 🔥 VISIT MAP
+    visit_map = np.zeros_like(gray, dtype=np.float32)
+
     # -----------------------------
-    # TSP (SMOOTHER PATH)
+    # TSP WITH MOMENTUM + MEMORY
     # -----------------------------
     used = np.zeros(len(pts), dtype=bool)
     path = []
@@ -271,11 +270,14 @@ def process_image_to_svg(
     path.append(tuple(pts[current]))
     used[current] = True
 
-    k = 12
+    direction = np.array([1.0, 0.0])
+    k = 14
 
     for _ in range(len(pts) - 1):
 
-        dists = np.sum((pts - pts[current])**2, axis=1).astype(float)
+        current_point = pts[current]
+
+        dists = np.sum((pts - current_point)**2, axis=1).astype(float)
         dists[used] = np.inf
 
         nearest = np.argpartition(dists, k)[:k]
@@ -284,14 +286,48 @@ def process_image_to_svg(
         if len(nearest) == 0:
             break
 
-        local = dists[nearest]
-        local[local == 0] = 1e-6
+        candidates = pts[nearest]
 
-        # 🔥 smoother selection (less jumpy)
-        weights = 1 / (local + 1e-6)
-        weights /= np.sum(weights)
+        local_dists = dists[nearest]
+        local_dists[local_dists == 0] = 1e-6
+        dist_score = np.exp(-local_dists / np.min(local_dists))
 
-        next_index = np.random.choice(nearest, p=weights)
+        vectors = candidates - current_point
+        norms = np.linalg.norm(vectors, axis=1)
+        norms[norms == 0] = 1e-6
+
+        unit_vectors = vectors / norms[:, None]
+
+        dir_unit = direction / (np.linalg.norm(direction) + 1e-6)
+        alignment = np.dot(unit_vectors, dir_unit)
+        dir_score = (alignment + 1) / 2
+
+        xs = np.clip(candidates[:,0].astype(int), 0, gray.shape[1]-1)
+        ys = np.clip(candidates[:,1].astype(int), 0, gray.shape[0]-1)
+
+        tones = 1 - gray[ys, xs] / 255
+        visit_penalty = 1 / (1 + visit_map[ys, xs])
+
+        tone_score = (tones ** 2.0) * visit_penalty
+
+        scores = (
+            dist_score * 0.25 +
+            dir_score * 0.45 +
+            tone_score * 0.30
+        )
+
+        scores = np.clip(scores, 1e-6, None)
+        probs = scores / np.sum(scores)
+
+        next_index = np.random.choice(nearest, p=probs)
+
+        px = int(pts[next_index][0])
+        py = int(pts[next_index][1])
+        if 0 <= px < gray.shape[1] and 0 <= py < gray.shape[0]:
+            visit_map[py, px] += 1.0
+
+        new_direction = pts[next_index] - current_point
+        direction = direction * 0.7 + new_direction * 0.3
 
         path.append(tuple(pts[next_index]))
         used[next_index] = True
@@ -299,9 +335,15 @@ def process_image_to_svg(
 
     pts = np.array(path)
 
-    if len(pts) > 6000:
-        pts = pts[::2]
+    # 🔥 ADAPTIVE REDUCTION
+    xs = np.clip(pts[:,0].astype(int), 0, gray.shape[1]-1)
+    ys = np.clip(pts[:,1].astype(int), 0, gray.shape[0]-1)
+    tones = 1 - gray[ys, xs] / 255
 
+    mask = np.random.rand(len(pts)) < (0.4 + tones * 0.6)
+    pts = pts[mask]
+
+    # smoothing
     try:
         tck, _ = splprep([pts[:,0], pts[:,1]], s=smoothness * 0.05)
         u = np.linspace(0, 1, len(pts))
@@ -311,7 +353,6 @@ def process_image_to_svg(
         smooth_path = path
 
     width_mm, height_mm = PRINT_SIZES.get(size, (210, 297))
-
     if orientation == "landscape":
         width_mm, height_mm = height_mm, width_mm
 

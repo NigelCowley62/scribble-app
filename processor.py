@@ -4,14 +4,18 @@ import svgwrite
 from scipy.interpolate import splprep, splev
 
 # -----------------------------
-# FACE DETECTOR
+# DETECTORS
 # -----------------------------
 face_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
 )
 
+eye_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + 'haarcascade_eye.xml'
+)
+
 # -----------------------------
-# PRINT SIZES (mm)
+# PRINT SIZES
 # -----------------------------
 PRINT_SIZES = {
     "A4": (210, 297),
@@ -21,7 +25,32 @@ PRINT_SIZES = {
 }
 
 # -----------------------------
-# WATERMARK (SUBTLE)
+# AUTO TONE
+# -----------------------------
+def auto_tone(gray):
+    mean = np.mean(gray)
+    std = np.std(gray)
+
+    brightness = 0
+    contrast = 1.1
+    gamma = 0.9
+
+    if mean < 100:
+        brightness = 20
+        gamma = 0.85
+    elif mean > 160:
+        brightness = -10
+        gamma = 1.1
+
+    if std < 40:
+        contrast = 1.3
+    elif std > 70:
+        contrast = 0.9
+
+    return brightness, contrast, gamma
+
+# -----------------------------
+# WATERMARK
 # -----------------------------
 def add_watermark(image_path):
     img = cv2.imread(image_path)
@@ -88,9 +117,18 @@ def save_preview_from_path(path, png_path, size="A4", orientation="portrait"):
     cv2.imwrite(png_path, img)
 
 # -----------------------------
-# FLOW FIELD (TONALLY AWARE)
+# HELPER
 # -----------------------------
-def generate_points(gray, angle, edges, density, chaos, faces):
+def in_box(x, y, boxes):
+    for (bx, by, bw, bh) in boxes:
+        if bx <= x <= bx + bw and by <= y <= by + bh:
+            return True
+    return False
+
+# -----------------------------
+# FLOW FIELD (MULTI-FREQUENCY)
+# -----------------------------
+def generate_points(gray, angle_mid, angle_small, angle_large, edges, density, chaos, faces, eyes):
 
     h, w = gray.shape
     points = []
@@ -99,7 +137,9 @@ def generate_points(gray, angle, edges, density, chaos, faces):
         path = []
 
         tone0 = 1 - gray[int(y), int(x)] / 255
-        max_len = int(25 + tone0 * 80 + np.random.randint(0, 30))
+        max_len = int(30 + tone0 * 100 + np.random.randint(0, 40))
+
+        prev_theta = None
 
         for _ in range(max_len):
 
@@ -112,43 +152,83 @@ def generate_points(gray, angle, edges, density, chaos, faces):
             tone = 1 - gray[iy, ix] / 255
             edge_strength = edges[iy, ix] / 255
 
-            theta = angle[iy, ix] + np.pi / 2
+            is_face = in_box(ix, iy, faces)
+            is_eye = in_box(ix, iy, eyes)
 
-            # edge anchoring
-            if edge_strength > 0.25:
-                theta = angle[iy, ix] + np.pi / 2
+            # -----------------------------
+            # MULTI-FREQUENCY FLOW
+            # -----------------------------
+            coarse = angle_large[iy, ix] + np.pi / 2
+            mid = angle_mid[iy, ix] + np.pi / 2
+            fine = angle_small[iy, ix] + np.pi / 2
 
-            local_chaos = chaos * (0.6 + tone * 1.2)
-            theta += np.random.normal(0, local_chaos)
+            base_theta = (
+                coarse * (1 - tone) * 0.6 +
+                mid * 0.3 +
+                fine * tone * 0.7
+            )
 
-            step = 0.03 + (1 - tone) * 0.6
+            # momentum
+            if prev_theta is not None:
+                base_theta = 0.75 * prev_theta + 0.25 * base_theta
+
+            # curvature constraint
+            if prev_theta is not None:
+                delta = base_theta - prev_theta
+                delta = (delta + np.pi) % (2*np.pi) - np.pi
+                delta = np.clip(delta, -0.4, 0.4)
+                base_theta = prev_theta + delta
+
+            # engraving illusion
+            micro = np.sin(ix * 0.08 + iy * 0.08) * 0.15 * tone
+            directional_bias = np.sin(ix * 0.02) * 0.3 * tone
+
+            local_chaos = chaos * (0.5 + tone)
+
+            if is_face:
+                local_chaos *= 0.6
+            if is_eye:
+                local_chaos *= 0.3
+
+            theta = base_theta + micro + directional_bias + np.random.normal(0, local_chaos)
+
+            step = 0.015 + (1 - tone) * 0.5
 
             x += np.cos(theta) * step
             y += np.sin(theta) * step
 
-            # 🔥 dark density boost
-            if tone > 0.6:
-                for _ in range(2):
+            if tone > 0.65:
+                repeats = 2
+                if is_face:
+                    repeats += 1
+                if is_eye:
+                    repeats += 2
+
+                for _ in range(repeats):
                     path.append((
-                        x + np.random.normal(0, 0.3),
-                        y + np.random.normal(0, 0.3)
+                        x + np.random.normal(0, 0.2),
+                        y + np.random.normal(0, 0.2)
                     ))
+
+            prev_theta = theta
 
         return path
 
     for _ in range(density):
-
         x = np.random.randint(0, w)
         y = np.random.randint(0, h)
 
         tone = 1 - gray[y, x] / 255
         edge_strength = edges[y, x] / 255
 
-        # 🔥 TONAL SEEDING
         prob = (tone ** 2.8) * 1.8 + edge_strength * 1.2
-        prob = min(max(prob, 0), 1)
 
-        if np.random.rand() < prob:
+        if in_box(x, y, faces):
+            prob *= 1.2
+        if in_box(x, y, eyes):
+            prob *= 1.6
+
+        if np.random.rand() < min(max(prob, 0), 1):
             line = trace_line(x, y)
             for p in line:
                 points.append((int(p[0]), int(p[1])))
@@ -165,7 +245,8 @@ def process_image_to_svg(
     smoothness=5,
     chaos=0.2,
     size="A4",
-    orientation="portrait"
+    orientation="portrait",
+    auto_tone_mode=True
 ):
 
     img = cv2.imread(input_path)
@@ -178,63 +259,88 @@ def process_image_to_svg(
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
+    if auto_tone_mode:
+        b, c, g = auto_tone(gray)
+        gray = np.clip(gray * c + b, 0, 255).astype(np.uint8)
+        gray = np.array(255 * (gray / 255) ** g, dtype=np.uint8)
+
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
     gray = clahe.apply(gray)
 
     edges = cv2.Canny(gray, 50, 130)
 
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    gx = cv2.Sobel(blur, cv2.CV_32F, 1, 0)
-    gy = cv2.Sobel(blur, cv2.CV_32F, 0, 1)
-    angle = np.arctan2(gy, gx)
+    faces = face_cascade.detectMultiScale(gray, 1.1, 5)
+    eyes = []
 
-    # 🔥 rich generation
-    points = generate_points(gray, angle, edges, int(density * 3), chaos, [])
+    for (fx, fy, fw, fh) in faces:
+        roi = gray[fy:fy+fh, fx:fx+fw]
+        detected = eye_cascade.detectMultiScale(roi, 1.1, 4)
+        for (ex, ey, ew, eh) in detected:
+            eyes.append((fx+ex, fy+ey, ew, eh))
+
+    # MULTI-SCALE FLOW
+    blur_small = cv2.GaussianBlur(gray, (3, 3), 0)
+    blur_large = cv2.GaussianBlur(gray, (11, 11), 0)
+
+    gx_small = cv2.Sobel(blur_small, cv2.CV_32F, 1, 0)
+    gy_small = cv2.Sobel(blur_small, cv2.CV_32F, 0, 1)
+
+    gx_large = cv2.Sobel(blur_large, cv2.CV_32F, 1, 0)
+    gy_large = cv2.Sobel(blur_large, cv2.CV_32F, 0, 1)
+
+    angle_small = np.arctan2(gy_small, gx_small)
+    angle_large = np.arctan2(gy_large, gx_large)
+
+    blur_mid = cv2.GaussianBlur(gray, (5, 5), 0)
+    gx_mid = cv2.Sobel(blur_mid, cv2.CV_32F, 1, 0)
+    gy_mid = cv2.Sobel(blur_mid, cv2.CV_32F, 0, 1)
+    angle_mid = np.arctan2(gy_mid, gx_mid)
+
+    points = generate_points(
+        gray, angle_mid, angle_small, angle_large,
+        edges, int(density * 3), chaos, faces, eyes
+    )
 
     pts = np.array(points)
 
-    if len(pts) < 100:
-        raise ValueError("Too few points")
-
-    # 🔥 SMART CAP (keeps tone structure)
-    MAX_POINTS = min(int(density * 12), 22000)
-
+    # ADAPTIVE DENSITY
     xs = np.clip(pts[:,0].astype(int), 0, gray.shape[1]-1)
     ys = np.clip(pts[:,1].astype(int), 0, gray.shape[0]-1)
 
     tones = 1 - gray[ys, xs] / 255
-    keep_prob = 0.25 + tones * 0.75
+    edge_vals = edges[ys, xs] / 255
 
-    mask = np.random.rand(len(pts)) < keep_prob
-    pts = pts[mask]
+    density_map = (tones ** 2.2 * 0.7 + edge_vals * 0.9)
 
+    feature_boost = np.zeros(len(xs))
+    for i in range(len(xs)):
+        if in_box(xs[i], ys[i], eyes):
+            feature_boost[i] = 1.0
+        elif in_box(xs[i], ys[i], faces):
+            feature_boost[i] = 0.4
+
+    density_map += feature_boost * 0.6
+    density_map = np.clip(density_map, 0, 1)
+
+    keep_prob = 0.15 + density_map * 0.85
+    pts = pts[np.random.rand(len(pts)) < keep_prob]
+
+    MAX_POINTS = min(int(density * 12), 22000)
     if len(pts) > MAX_POINTS:
-        idx = np.random.choice(len(pts), MAX_POINTS, replace=False)
-        pts = pts[idx]
+        pts = pts[np.random.choice(len(pts), MAX_POINTS, replace=False)]
 
-    # -----------------------------
-    # TSP (EDGE-FIRST + MOMENTUM)
-    # -----------------------------
+    # TSP
     used = np.zeros(len(pts), dtype=bool)
     path = []
 
     current = np.random.randint(len(pts))
-    direction = np.array([1.0, 0.0])
-
     path.append(tuple(pts[current]))
     used[current] = True
 
-    total_steps = len(pts)
     k = 10
 
     for _ in range(len(pts)-1):
-
-        if len(path) > MAX_POINTS:
-            break
-
-        current_point = pts[current]
-
-        dists = np.sum((pts - current_point)**2, axis=1).astype(float)
+        dists = np.sum((pts - pts[current])**2, axis=1).astype(float)
         dists[used] = np.inf
 
         nearest = np.argpartition(dists, k)[:k]
@@ -243,47 +349,13 @@ def process_image_to_svg(
         if len(nearest) == 0:
             break
 
-        candidates = pts[nearest]
+        local = dists[nearest]
+        local[local == 0] = 1e-6
 
-        local_dists = dists[nearest]
-        local_dists[local_dists == 0] = 1e-6
+        weights = np.exp(-local / np.min(local))
+        weights /= np.sum(weights)
 
-        min_dist = max(np.min(local_dists), 1e-6)
-        dist_score = np.exp(-local_dists / min_dist)
-
-        vectors = candidates - current_point
-        norms = np.linalg.norm(vectors, axis=1)
-        norms[norms == 0] = 1e-6
-
-        unit_vectors = vectors / norms[:, None]
-        dir_unit = direction / (np.linalg.norm(direction) + 1e-6)
-
-        alignment = np.dot(unit_vectors, dir_unit)
-        dir_score = (alignment + 1) / 2
-
-        xs = np.clip(candidates[:,0].astype(int), 0, gray.shape[1]-1)
-        ys = np.clip(candidates[:,1].astype(int), 0, gray.shape[0]-1)
-
-        tones = 1 - gray[ys, xs] / 255
-        edge_vals = edges[ys, xs] / 255
-
-        progress = len(path) / total_steps
-        edge_phase = max(0, 1 - progress * 2.5)
-
-        scores = (
-            dist_score * 0.2 +
-            dir_score * 0.5 +
-            tones * (0.3 * (1 - edge_phase)) +
-            edge_vals * (0.2 + edge_phase * 0.8)
-        )
-
-        scores = np.clip(scores, 1e-6, None)
-        probs = scores / np.sum(scores)
-
-        next_index = np.random.choice(nearest, p=probs)
-
-        new_direction = pts[next_index] - current_point
-        direction = direction * 0.75 + new_direction * 0.25
+        next_index = np.random.choice(nearest, p=weights)
 
         path.append(tuple(pts[next_index]))
         used[next_index] = True
@@ -291,9 +363,7 @@ def process_image_to_svg(
 
     pts = np.array(path)
 
-    # -----------------------------
     # SMOOTH
-    # -----------------------------
     try:
         tck, _ = splprep([pts[:,0], pts[:,1]], s=smoothness * 0.05)
         u = np.linspace(0,1,len(pts))
@@ -302,9 +372,7 @@ def process_image_to_svg(
     except:
         smooth_path = path
 
-    # -----------------------------
     # SCALE
-    # -----------------------------
     width_mm, height_mm = PRINT_SIZES.get(size, (210,297))
     if orientation == "landscape":
         width_mm, height_mm = height_mm, width_mm

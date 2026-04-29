@@ -126,7 +126,7 @@ def generate_points(gray, angle, edges, density, chaos, faces):
             x += np.cos(theta) * step
             y += np.sin(theta) * step
 
-            # 🔥 dark density boost
+            # dark density boost
             if tone > 0.6:
                 for _ in range(2):
                     path.append((
@@ -144,7 +144,6 @@ def generate_points(gray, angle, edges, density, chaos, faces):
         tone = 1 - gray[y, x] / 255
         edge_strength = edges[y, x] / 255
 
-        # 🔥 TONAL SEEDING
         prob = (tone ** 2.8) * 1.8 + edge_strength * 1.2
         prob = min(max(prob, 0), 1)
 
@@ -188,7 +187,6 @@ def process_image_to_svg(
     gy = cv2.Sobel(blur, cv2.CV_32F, 0, 1)
     angle = np.arctan2(gy, gx)
 
-    # 🔥 rich generation
     points = generate_points(gray, angle, edges, int(density * 3), chaos, [])
 
     pts = np.array(points)
@@ -196,7 +194,6 @@ def process_image_to_svg(
     if len(pts) < 100:
         raise ValueError("Too few points")
 
-    # 🔥 SMART CAP (keeps tone structure)
     MAX_POINTS = min(int(density * 12), 22000)
 
     xs = np.clip(pts[:,0].astype(int), 0, gray.shape[1]-1)
@@ -213,7 +210,7 @@ def process_image_to_svg(
         pts = pts[idx]
 
     # -----------------------------
-    # TSP (EDGE-FIRST + MOMENTUM)
+    # TSP (SAFE + SAME LOOK)
     # -----------------------------
     used = np.zeros(len(pts), dtype=bool)
     path = []
@@ -235,6 +232,9 @@ def process_image_to_svg(
         current_point = pts[current]
 
         dists = np.sum((pts - current_point)**2, axis=1).astype(float)
+
+        # 🔧 stability fix
+        dists[dists < 1e-6] = 1e-6
         dists[used] = np.inf
 
         nearest = np.argpartition(dists, k)[:k]
@@ -246,14 +246,13 @@ def process_image_to_svg(
         candidates = pts[nearest]
 
         local_dists = dists[nearest]
-        local_dists[local_dists == 0] = 1e-6
 
         min_dist = max(np.min(local_dists), 1e-6)
         dist_score = np.exp(-local_dists / min_dist)
 
         vectors = candidates - current_point
         norms = np.linalg.norm(vectors, axis=1)
-        norms[norms == 0] = 1e-6
+        norms[norms < 1e-6] = 1e-6
 
         unit_vectors = vectors / norms[:, None]
         dir_unit = direction / (np.linalg.norm(direction) + 1e-6)
@@ -277,10 +276,16 @@ def process_image_to_svg(
             edge_vals * (0.2 + edge_phase * 0.8)
         )
 
-        scores = np.clip(scores, 1e-6, None)
-        probs = scores / np.sum(scores)
+        # 🔧 safety fix (no NaN crash)
+        scores = np.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
 
-        next_index = np.random.choice(nearest, p=probs)
+        total = np.sum(scores)
+
+        if total <= 0:
+            next_index = np.random.choice(nearest)
+        else:
+            probs = scores / total
+            next_index = np.random.choice(nearest, p=probs)
 
         new_direction = pts[next_index] - current_point
         direction = direction * 0.75 + new_direction * 0.25

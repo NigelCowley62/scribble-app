@@ -1,13 +1,14 @@
+# Python
 __pycache__/
 *.pyc
+
+# Virtual environments
+venv/
+env/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Optional (if you upload images)
 uploads/
-output.svg
-output.png
-.env"*.png" 
-"*.svg" 
-"uploads/" 
-"outputs/" 
-"*.png" 
-"*.svg" 
-"uploads/" 
-"outputs/" 
